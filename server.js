@@ -17,7 +17,7 @@ const COLORS = ['#FF5733', '#33FF57', '#3357FF', '#F333FF', '#33FFF3', '#F3FF33'
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
 
-    on('createSession', () => {
+    socket.on('createSession', () => {
         const sessionId = Math.random().toString(36).substring(2, 8);
         const adminId = socket.id;
         sessions[sessionId] = {
