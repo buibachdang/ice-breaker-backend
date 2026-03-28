@@ -15,12 +15,15 @@ const sessions = {};
 const COLORS = ['#FF5733', '#33FF57', '#3357FF', '#F333FF', '#33FFF3', '#F3FF33', '#FF8333', '#83FF33', '#3383FF', '#8333FF'];
 
 io.on('connection', (socket) => {
-    socket.on('createSession', () => {
+    console.log('User connected:', socket.id);
+
+    on('createSession', () => {
         const sessionId = Math.random().toString(36).substring(2, 8);
         const adminId = socket.id;
         sessions[sessionId] = {
             id: sessionId, adminId, timeSetting: 60, status: 'waiting',
-            players: {}, iceRemaining: 1000, timer: null
+            players: {}, iceRemaining: 1000, timer: null,
+            brokenBlocks: [] // <--- NEW: Track exactly which blocks are broken
         };
         socket.join(sessionId);
         socket.emit('sessionCreated', sessionId);
@@ -93,32 +96,56 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('clickIce', (sessionId) => {
+socket.on('clickIce', ({ sessionId, blockIndex }) => {
         const session = sessions[sessionId];
         if (!session || session.status !== 'playing' || session.iceRemaining <= 0) return;
         const player = session.players[socket.id];
         if (!player) return;
 
-        // Player must be close to the center (400, 300) to mine
-        const dist = Math.hypot(player.x - 400, player.y - 300);
-        if (dist > 150) return; 
+        // Ensure the block isn't already broken
+        if (session.brokenBlocks.includes(blockIndex)) return;
 
         const now = Date.now();
-        // Rolling 1 second window
         player.clickTimestamps = player.clickTimestamps.filter(t => now - t < 1000);
         player.clickTimestamps.push(now);
 
+        // Calculate combo multiplier (max 5 cubes per click)
         const recentClicks = player.clickTimestamps.length;
         let cubesToBreak = Math.min(5, 1 + Math.floor(recentClicks / 2));
         cubesToBreak = Math.min(cubesToBreak, session.iceRemaining);
 
+        const brokenThisClick = [];
         if (cubesToBreak > 0) {
-            session.iceRemaining -= cubesToBreak;
-            player.score += cubesToBreak;
+            // 1. Break the primary target block
+            session.brokenBlocks.push(blockIndex);
+            brokenThisClick.push(blockIndex);
+            cubesToBreak--;
+
+            // 2. Break adjacent blocks to satisfy the combo multiplier
+            let offset = 1;
+            while (cubesToBreak > 0 && session.brokenBlocks.length < 1000 && offset < 1000) {
+                if (blockIndex + offset < 1000 && !session.brokenBlocks.includes(blockIndex + offset)) {
+                    session.brokenBlocks.push(blockIndex + offset);
+                    brokenThisClick.push(blockIndex + offset);
+                    cubesToBreak--;
+                }
+                if (cubesToBreak > 0 && blockIndex - offset >= 0 && !session.brokenBlocks.includes(blockIndex - offset)) {
+                    session.brokenBlocks.push(blockIndex - offset);
+                    brokenThisClick.push(blockIndex - offset);
+                    cubesToBreak--;
+                }
+                offset++;
+            }
+
+            const totalBroken = brokenThisClick.length;
+            session.iceRemaining -= totalBroken;
+            player.score += totalBroken;
             player.timeReachedHighest = now;
 
+            // Broadcast the exact broken blocks array to everyone
             io.to(sessionId).emit('iceUpdate', { 
                 iceRemaining: session.iceRemaining, 
+                brokenBlocks: session.brokenBlocks, 
                 players: session.players 
             });
 
