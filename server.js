@@ -29,14 +29,11 @@ io.on('connection', (socket) => {
         socket.emit('sessionCreated', sessionId);
     });
 
-// Allow admin to update settings
-    socket.on('updateSettings', ({ sessionId, time, shape, size }) => {
+    socket.on('updateTime', ({ sessionId, time }) => {
         const session = sessions[sessionId];
         if (session && session.adminId === socket.id && session.status === 'waiting') {
             session.timeSetting = Math.max(30, Math.min(300, time));
-            session.shape = shape || 'circle';
-            session.size = Math.max(50, Math.min(250, size || 100));
-            io.to(sessionId).emit('settingsUpdated', { time: session.timeSetting, shape: session.shape, size: session.size });
+            io.to(sessionId).emit('timeUpdated', session.timeSetting);
         }
     });
 
@@ -57,72 +54,30 @@ io.on('connection', (socket) => {
         io.to(sessionId).emit('updatePlayers', Object.values(session.players));
     });
 
-socket.on('startGame', (sessionId) => {
+    socket.on('startGame', (sessionId) => {
         const session = sessions[sessionId];
         if (session && session.adminId === socket.id) {
             session.status = 'playing';
             
-            // Set defaults if admin didn't change them
-            if (!session.shape) { session.shape = 'circle'; session.size = 100; }
-            
-            // Calculate dynamic cube count based on Area (1 cube = 25px area)
-            let area = 0;
-            if (session.shape === 'circle') {
-                area = Math.PI * session.size * session.size;
-            } else if (session.shape === 'square') {
-                area = (session.size * 2) * (session.size * 2); 
-            }
-            session.totalIce = Math.floor(area / 25);
-            session.iceRemaining = session.totalIce;
-
-            // Strict Equidistant Spawning
+            // Assign perimeter spawn positions evenly
             const playerIds = Object.keys(session.players);
-            const numPlayers = playerIds.length;
-            const spawnDistance = 150; // Every player is exactly 150px away from the ice
+            const w = 800, h = 600; 
+            const perimeter = 2 * (w + h);
+            const spacing = perimeter / playerIds.length;
 
             playerIds.forEach((id, index) => {
+                let dist = index * spacing;
                 let px, py;
-                
-                if (session.shape === 'circle') {
-                    // Spawn on a concentric circle
-                    const angle = (index / numPlayers) * Math.PI * 2;
-                    const spawnRadius = session.size + spawnDistance;
-                    px = 400 + Math.cos(angle) * spawnRadius;
-                    py = 300 + Math.sin(angle) * spawnRadius;
-                } 
-                else if (session.shape === 'square') {
-                    // Spawn strictly along the straight offset edges to avoid corner distance distortion
-                    const edgeLength = session.size * 2; 
-                    const totalSafePerimeter = edgeLength * 4;
-                    const distanceAlongPerimeter = (index / numPlayers) * totalSafePerimeter;
-                    
-                    const offset = session.size + spawnDistance;
-                    
-                    if (distanceAlongPerimeter < edgeLength) { // Top edge
-                        px = 400 - session.size + distanceAlongPerimeter;
-                        py = 300 - offset;
-                    } else if (distanceAlongPerimeter < edgeLength * 2) { // Right edge
-                        px = 400 + offset;
-                        py = 300 - session.size + (distanceAlongPerimeter - edgeLength);
-                    } else if (distanceAlongPerimeter < edgeLength * 3) { // Bottom edge
-                        px = 400 + session.size - (distanceAlongPerimeter - edgeLength * 2);
-                        py = 300 + offset;
-                    } else { // Left edge
-                        px = 400 - offset;
-                        py = 300 + session.size - (distanceAlongPerimeter - edgeLength * 3);
-                    }
-                }
+                if (dist < w) { px = dist; py = 0; }
+                else if (dist < w + h) { px = w; py = dist - w; }
+                else if (dist < 2 * w + h) { px = w - (dist - (w + h)); py = h; }
+                else { px = 0; py = h - (dist - (2 * w + h)); }
                 
                 session.players[id].x = px;
                 session.players[id].y = py;
             });
 
-            io.to(sessionId).emit('gameStarted', { 
-                players: session.players, 
-                time: session.timeSetting,
-                shape: session.shape,
-                initialIce: session.totalIce
-            });
+            io.to(sessionId).emit('gameStarted', { players: session.players, time: session.timeSetting });
 
             session.timer = setInterval(() => {
                 session.timeSetting--;
