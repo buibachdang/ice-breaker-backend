@@ -22,8 +22,8 @@ io.on('connection', (socket) => {
         const adminId = socket.id;
         sessions[sessionId] = {
             id: sessionId, adminId, timeSetting: 60, status: 'waiting',
-            players: {}, iceRemaining: 1000, timer: null,
-            brokenBlocks: [] // <--- NEW: Track exactly which blocks are broken
+            players: {}, totalIceBlocks: 0, timer: null,
+            brokenBlocks: [] // Tracks all broken block indices
         };
         socket.join(sessionId);
         socket.emit('sessionCreated', sessionId);
@@ -54,30 +54,21 @@ io.on('connection', (socket) => {
         io.to(sessionId).emit('updatePlayers', Object.values(session.players));
     });
 
-    socket.on('startGame', (sessionId) => {
+    socket.on('startGame', ({ sessionId, players: playerSpawns, totalBlocks }) => {
         const session = sessions[sessionId];
         if (session && session.adminId === socket.id) {
             session.status = 'playing';
-            
-            // Assign perimeter spawn positions evenly
-            const playerIds = Object.keys(session.players);
-            const w = 800, h = 600; 
-            const perimeter = 2 * (w + h);
-            const spacing = perimeter / playerIds.length;
+            session.totalIceBlocks = totalBlocks;
 
-            playerIds.forEach((id, index) => {
-                let dist = index * spacing;
-                let px, py;
-                if (dist < w) { px = dist; py = 0; }
-                else if (dist < w + h) { px = w; py = dist - w; }
-                else if (dist < 2 * w + h) { px = w - (dist - (w + h)); py = h; }
-                else { px = 0; py = h - (dist - (2 * w + h)); }
-                
-                session.players[id].x = px;
-                session.players[id].y = py;
+            // Assign pre-calculated spawn positions from client
+            Object.keys(session.players).forEach(id => {
+                if (playerSpawns[id]) {
+                    session.players[id].x = playerSpawns[id].x;
+                    session.players[id].y = playerSpawns[id].y;
+                }
             });
 
-            io.to(sessionId).emit('gameStarted', { players: session.players, time: session.timeSetting });
+            io.to(sessionId).emit('gameStarted', { players: session.players, time: session.timeSetting, totalBlocks: session.totalIceBlocks });
 
             session.timer = setInterval(() => {
                 session.timeSetting--;
@@ -96,60 +87,36 @@ io.on('connection', (socket) => {
         }
     });
 
-socket.on('clickIce', ({ sessionId, blockIndex }) => {
+    socket.on('clickIce', ({ sessionId, blocksToBreak }) => {
         const session = sessions[sessionId];
-        if (!session || session.status !== 'playing' || session.iceRemaining <= 0) return;
+        if (!session || session.status !== 'playing') return;
         const player = session.players[socket.id];
         if (!player) return;
 
-        // Ensure the block isn't already broken
-        if (session.brokenBlocks.includes(blockIndex)) return;
-
         const now = Date.now();
-        player.clickTimestamps = player.clickTimestamps.filter(t => now - t < 1000);
-        player.clickTimestamps.push(now);
+        const newlyBroken = [];
 
-        // Calculate combo multiplier (max 5 cubes per click)
-        const recentClicks = player.clickTimestamps.length;
-        let cubesToBreak = Math.min(5, 1 + Math.floor(recentClicks / 2));
-        cubesToBreak = Math.min(cubesToBreak, session.iceRemaining);
-
-        const brokenThisClick = [];
-        if (cubesToBreak > 0) {
-            // 1. Break the primary target block
-            session.brokenBlocks.push(blockIndex);
-            brokenThisClick.push(blockIndex);
-            cubesToBreak--;
-
-            // 2. Break adjacent blocks to satisfy the combo multiplier
-            let offset = 1;
-            while (cubesToBreak > 0 && session.brokenBlocks.length < 1000 && offset < 1000) {
-                if (blockIndex + offset < 1000 && !session.brokenBlocks.includes(blockIndex + offset)) {
-                    session.brokenBlocks.push(blockIndex + offset);
-                    brokenThisClick.push(blockIndex + offset);
-                    cubesToBreak--;
-                }
-                if (cubesToBreak > 0 && blockIndex - offset >= 0 && !session.brokenBlocks.includes(blockIndex - offset)) {
-                    session.brokenBlocks.push(blockIndex - offset);
-                    brokenThisClick.push(blockIndex - offset);
-                    cubesToBreak--;
-                }
-                offset++;
+        // Filter out blocks that are already broken
+        blocksToBreak.forEach(blockIndex => {
+            if (!session.brokenBlocks.includes(blockIndex)) {
+                session.brokenBlocks.push(blockIndex);
+                newlyBroken.push(blockIndex);
             }
+        });
 
-            const totalBroken = brokenThisClick.length;
-            session.iceRemaining -= totalBroken;
-            player.score += totalBroken;
+        if (newlyBroken.length > 0) {
+            player.score += newlyBroken.length;
             player.timeReachedHighest = now;
 
-            // Broadcast the exact broken blocks array to everyone
+            const iceRemaining = session.totalIceBlocks - session.brokenBlocks.length;
+
             io.to(sessionId).emit('iceUpdate', { 
-                iceRemaining: session.iceRemaining, 
+                iceRemaining: iceRemaining,
                 brokenBlocks: session.brokenBlocks, 
                 players: session.players 
             });
 
-            if (session.iceRemaining <= 0) endGame(sessionId);
+            if (iceRemaining <= 0) endGame(sessionId);
         }
     });
 
