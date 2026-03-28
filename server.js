@@ -12,7 +12,15 @@ const io = new Server(server, {
 });
 
 const sessions = {};
-const COLORS = ['#FF5733', '#33FF57', '#3357FF', '#F333FF', '#33FFF3', '#F3FF33', '#FF8333', '#83FF33', '#3383FF', '#8333FF'];
+const PLAYER_COLORS = ['#FF8C00', '#9932CC', '#FFD700', '#FF69B4', '#00CED1', '#FF4500', '#ADFF2F', '#DA70D6', '#F0E68C', '#87CEEB'];
+const ICE_COLORS = {
+    '#add8e6': 1, // Light Blue (more common)
+    '#87ceeb': 1, // Sky Blue
+    '#4682b4': 3, // Steel Blue
+    '#1e90ff': 5, // Dodger Blue
+    '#0000ff': 5  // Blue (rare)
+};
+const ICE_COLOR_KEYS = Object.keys(ICE_COLORS);
 
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
@@ -22,7 +30,7 @@ io.on('connection', (socket) => {
         const adminId = socket.id;
         sessions[sessionId] = {
             id: sessionId, adminId, timeSetting: 60, status: 'waiting',
-            players: {}, totalIceBlocks: 0, timer: null,
+            players: {}, iceBlocks: [], timer: null,
             brokenBlocks: [] // Tracks all broken block indices
         };
         socket.join(sessionId);
@@ -43,22 +51,34 @@ io.on('connection', (socket) => {
         if (session.status !== 'waiting') return socket.emit('error', 'Game already started');
         if (Object.keys(session.players).length >= 20) return socket.emit('error', 'Game is full');
 
-        const color = COLORS[Object.keys(session.players).length % COLORS.length];
+        const color = PLAYER_COLORS[Object.keys(session.players).length % PLAYER_COLORS.length];
         session.players[socket.id] = {
             id: socket.id, name, color,
             x: -100, y: -100, // Spawn positions set on game start
-            score: 0, clickTimestamps: [], timeReachedHighest: 0
+            score: 0, timeReachedHighest: 0
         };
 
         socket.join(sessionId);
         io.to(sessionId).emit('updatePlayers', Object.values(session.players));
     });
 
-    socket.on('startGame', ({ sessionId, players: playerSpawns, totalBlocks }) => {
+    socket.on('startGame', ({ sessionId, players: playerSpawns, blockPositions }) => {
         const session = sessions[sessionId];
         if (session && session.adminId === socket.id) {
             session.status = 'playing';
-            session.totalIceBlocks = totalBlocks;
+            
+            // NEW: Generate ice block data with colors and scores
+            session.iceBlocks = blockPositions.map((pos, index) => {
+                const color = ICE_COLOR_KEYS[Math.floor(Math.random() * ICE_COLOR_KEYS.length)];
+                return {
+                    id: index,
+                    x: pos.x,
+                    y: pos.y,
+                    color: color,
+                    score: ICE_COLORS[color],
+                    active: true
+                };
+            });
 
             // Assign pre-calculated spawn positions from client
             Object.keys(session.players).forEach(id => {
@@ -68,7 +88,11 @@ io.on('connection', (socket) => {
                 }
             });
 
-            io.to(sessionId).emit('gameStarted', { players: session.players, time: session.timeSetting, totalBlocks: session.totalIceBlocks });
+            io.to(sessionId).emit('gameStarted', {
+                players: session.players,
+                time: session.timeSetting,
+                iceBlocks: session.iceBlocks
+            });
 
             session.timer = setInterval(() => {
                 session.timeSetting--;
@@ -105,14 +129,23 @@ io.on('connection', (socket) => {
         });
 
         if (newlyBroken.length > 0) {
-            player.score += newlyBroken.length;
+            let scoreGained = 0;
+            newlyBroken.forEach(blockIndex => {
+                const block = session.iceBlocks[blockIndex];
+                if (block) {
+                    scoreGained += block.score;
+                    block.active = false; // Mark as inactive on the server too
+                }
+            });
+
+            player.score += scoreGained;
             player.timeReachedHighest = now;
 
-            const iceRemaining = session.totalIceBlocks - session.brokenBlocks.length;
+            const iceRemaining = session.iceBlocks.filter(b => b.active).length;
 
             io.to(sessionId).emit('iceUpdate', { 
                 iceRemaining: iceRemaining,
-                brokenBlocks: session.brokenBlocks, 
+                brokenBlocks: newlyBroken, // Send only the newly broken blocks
                 players: session.players 
             });
 
