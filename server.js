@@ -14,72 +14,26 @@ const io = new Server(server, {
 const sessions = {};
 const COLORS = ['#FF5733', '#33FF57', '#3357FF', '#F333FF', '#33FFF3', '#F3FF33', '#FF8333', '#83FF33', '#3383FF', '#8333FF'];
 
-// --- MATH HELPER: PERFECT DISTANCE TO EDGE ---
-function getEquidistantSpawns(shape, size, numPlayers, distanceToEdge) {
-    const cx = 400; // Center of canvas X
-    const cy = 300; // Center of canvas Y
-    const positions = [];
-
-    if (shape === 'circle') {
-        // Spawn on a concentric circle
-        const spawnRadius = size + distanceToEdge;
-        for (let i = 0; i < numPlayers; i++) {
-            const angle = (i / numPlayers) * Math.PI * 2;
-            positions.push({
-                x: cx + Math.cos(angle) * spawnRadius,
-                y: cy + Math.sin(angle) * spawnRadius
-            });
-        }
-    } else if (shape === 'square') {
-        // Spawn strictly along 4 lines perfectly parallel to the flat edges
-        // This guarantees the shortest path to the ice is exactly 'distanceToEdge'
-        const flatPerimeter = 8 * size; // 4 edges, each is (2 * size) long
-        
-        for (let i = 0; i < numPlayers; i++) {
-            const distAlong = (i / numPlayers) * flatPerimeter;
-            let px, py;
-            
-            if (distAlong < 2 * size) { 
-                // Top Edge
-                px = cx - size + distAlong;
-                py = cy - size - distanceToEdge;
-            } else if (distAlong < 4 * size) { 
-                // Right Edge
-                px = cx + size + distanceToEdge;
-                py = cy - size + (distAlong - 2 * size);
-            } else if (distAlong < 6 * size) { 
-                // Bottom Edge
-                px = cx + size - (distAlong - 4 * size);
-                py = cy + size + distanceToEdge;
-            } else { 
-                // Left Edge
-                px = cx - size - distanceToEdge;
-                py = cy + size - (distAlong - 6 * size);
-            }
-            positions.push({ x: px, y: py });
-        }
-    }
-    return positions;
-}
-
 io.on('connection', (socket) => {
+    console.log('User connected:', socket.id);
+
     socket.on('createSession', () => {
         const sessionId = Math.random().toString(36).substring(2, 8);
         const adminId = socket.id;
         sessions[sessionId] = {
-            id: sessionId, adminId, timeSetting: 60, shape: 'circle', size: 100,
-            status: 'waiting', players: {}, totalIce: 1000, iceRemaining: 1000, timer: null
+            id: sessionId, adminId, timeSetting: 60, status: 'waiting',
+            players: {}, iceRemaining: 1000, timer: null,
+            brokenBlocks: [] // <--- NEW: Track exactly which blocks are broken
         };
         socket.join(sessionId);
         socket.emit('sessionCreated', sessionId);
     });
 
-    socket.on('updateSettings', ({ sessionId, time, shape, size }) => {
+    socket.on('updateTime', ({ sessionId, time }) => {
         const session = sessions[sessionId];
         if (session && session.adminId === socket.id && session.status === 'waiting') {
             session.timeSetting = Math.max(30, Math.min(300, time));
-            session.shape = shape || 'circle';
-            session.size = Math.max(50, Math.min(250, size || 100));
+            io.to(sessionId).emit('timeUpdated', session.timeSetting);
         }
     });
 
@@ -92,7 +46,7 @@ io.on('connection', (socket) => {
         const color = COLORS[Object.keys(session.players).length % COLORS.length];
         session.players[socket.id] = {
             id: socket.id, name, color,
-            x: -100, y: -100, 
+            x: -100, y: -100, // Spawn positions set on game start
             score: 0, clickTimestamps: [], timeReachedHighest: 0
         };
 
@@ -105,29 +59,25 @@ io.on('connection', (socket) => {
         if (session && session.adminId === socket.id) {
             session.status = 'playing';
             
-            // Calculate total cubes based on area
-            let area = session.shape === 'circle' 
-                ? Math.PI * session.size * session.size 
-                : (session.size * 2) * (session.size * 2);
-            
-            session.totalIce = Math.floor(area / 25) || 1;
-            session.iceRemaining = session.totalIce;
-
-            // Apply Equidistant Spawning
+            // Assign perimeter spawn positions evenly
             const playerIds = Object.keys(session.players);
-            const spawnPoints = getEquidistantSpawns(session.shape, session.size, playerIds.length, 150);
-            
+            const w = 800, h = 600; 
+            const perimeter = 2 * (w + h);
+            const spacing = perimeter / playerIds.length;
+
             playerIds.forEach((id, index) => {
-                session.players[id].x = spawnPoints[index].x;
-                session.players[id].y = spawnPoints[index].y;
+                let dist = index * spacing;
+                let px, py;
+                if (dist < w) { px = dist; py = 0; }
+                else if (dist < w + h) { px = w; py = dist - w; }
+                else if (dist < 2 * w + h) { px = w - (dist - (w + h)); py = h; }
+                else { px = 0; py = h - (dist - (2 * w + h)); }
+                
+                session.players[id].x = px;
+                session.players[id].y = py;
             });
 
-            io.to(sessionId).emit('gameStarted', { 
-                players: session.players, 
-                time: session.timeSetting,
-                shape: session.shape,
-                initialIce: session.totalIce
-            });
+            io.to(sessionId).emit('gameStarted', { players: session.players, time: session.timeSetting });
 
             session.timer = setInterval(() => {
                 session.timeSetting--;
@@ -146,47 +96,56 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('clickIce', (sessionId) => {
+socket.on('clickIce', ({ sessionId, blockIndex }) => {
         const session = sessions[sessionId];
         if (!session || session.status !== 'playing' || session.iceRemaining <= 0) return;
         const player = session.players[socket.id];
         if (!player) return;
 
-        // Visual size of ice shrinks as cubes are broken
-        const scale = Math.sqrt(session.iceRemaining / session.totalIce);
-        const currentSize = session.size * scale;
-        
-        // Exact distance validation from the edge
-        let isCloseEnough = false;
-        const maxReach = 150 + 20; // 150px distance + 20px wiggle room for latency
-        
-        if (session.shape === 'circle') {
-            const distToCenter = Math.hypot(player.x - 400, player.y - 300);
-            if (distToCenter <= currentSize + maxReach) isCloseEnough = true; 
-        } else if (session.shape === 'square') {
-            if (player.x >= 400 - currentSize - maxReach && player.x <= 400 + currentSize + maxReach &&
-                player.y >= 300 - currentSize - maxReach && player.y <= 300 + currentSize + maxReach) {
-                isCloseEnough = true;
-            }
-        }
+        // Ensure the block isn't already broken
+        if (session.brokenBlocks.includes(blockIndex)) return;
 
-        if (!isCloseEnough) return; 
-
-        // Mining logic
         const now = Date.now();
         player.clickTimestamps = player.clickTimestamps.filter(t => now - t < 1000);
         player.clickTimestamps.push(now);
 
-        let cubesToBreak = Math.min(5, 1 + Math.floor(player.clickTimestamps.length / 2));
+        // Calculate combo multiplier (max 5 cubes per click)
+        const recentClicks = player.clickTimestamps.length;
+        let cubesToBreak = Math.min(5, 1 + Math.floor(recentClicks / 2));
         cubesToBreak = Math.min(cubesToBreak, session.iceRemaining);
 
+        const brokenThisClick = [];
         if (cubesToBreak > 0) {
-            session.iceRemaining -= cubesToBreak;
-            player.score += cubesToBreak;
+            // 1. Break the primary target block
+            session.brokenBlocks.push(blockIndex);
+            brokenThisClick.push(blockIndex);
+            cubesToBreak--;
+
+            // 2. Break adjacent blocks to satisfy the combo multiplier
+            let offset = 1;
+            while (cubesToBreak > 0 && session.brokenBlocks.length < 1000 && offset < 1000) {
+                if (blockIndex + offset < 1000 && !session.brokenBlocks.includes(blockIndex + offset)) {
+                    session.brokenBlocks.push(blockIndex + offset);
+                    brokenThisClick.push(blockIndex + offset);
+                    cubesToBreak--;
+                }
+                if (cubesToBreak > 0 && blockIndex - offset >= 0 && !session.brokenBlocks.includes(blockIndex - offset)) {
+                    session.brokenBlocks.push(blockIndex - offset);
+                    brokenThisClick.push(blockIndex - offset);
+                    cubesToBreak--;
+                }
+                offset++;
+            }
+
+            const totalBroken = brokenThisClick.length;
+            session.iceRemaining -= totalBroken;
+            player.score += totalBroken;
             player.timeReachedHighest = now;
 
+            // Broadcast the exact broken blocks array to everyone
             io.to(sessionId).emit('iceUpdate', { 
                 iceRemaining: session.iceRemaining, 
+                brokenBlocks: session.brokenBlocks, 
                 players: session.players 
             });
 
@@ -200,6 +159,7 @@ io.on('connection', (socket) => {
         session.status = 'ended';
         clearInterval(session.timer);
 
+        // Sort by score (desc), then by time reached (asc)
         const sorted = Object.values(session.players).sort((a, b) => {
             if (b.score !== a.score) return b.score - a.score;
             return a.timeReachedHighest - b.timeReachedHighest;
@@ -212,4 +172,8 @@ io.on('connection', (socket) => {
     }
 });
 
-server.listen(3000, () => console.log('Server running on port 3000'));
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);   
+});
