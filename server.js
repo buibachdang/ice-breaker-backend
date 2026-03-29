@@ -21,6 +21,10 @@ const ICE_COLORS = {
     '#0000ff': 5  // Blue (rare)
 };
 const ICE_COLOR_KEYS = Object.keys(ICE_COLORS);
+const PENALTY_COLOR = '#c62828'; // Red — penalty block
+const PENALTY_SCORE = -3;
+const PENALTY_CHANCE = 0.10; // 10% of blocks are penalty
+const HIT_COOLDOWN_MS = 300;
 
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
@@ -67,17 +71,12 @@ io.on('connection', (socket) => {
         if (session && session.adminId === socket.id) {
             session.status = 'playing';
             
-            // NEW: Generate ice block data with colors and scores
+            // Generate ice block data — 10% penalty (red), rest positive colours
             session.iceBlocks = blockPositions.map((pos, index) => {
-                const color = ICE_COLOR_KEYS[Math.floor(Math.random() * ICE_COLOR_KEYS.length)];
-                return {
-                    id: index,
-                    x: pos.x,
-                    y: pos.y,
-                    color: color,
-                    score: ICE_COLORS[color],
-                    active: true
-                };
+                const isPenalty = Math.random() < PENALTY_CHANCE;
+                const color = isPenalty ? PENALTY_COLOR : ICE_COLOR_KEYS[Math.floor(Math.random() * ICE_COLOR_KEYS.length)];
+                const score = isPenalty ? PENALTY_SCORE : ICE_COLORS[color];
+                return { id: index, x: pos.x, y: pos.y, color, score, active: true };
             });
 
             // Assign pre-calculated spawn positions from client
@@ -118,6 +117,11 @@ io.on('connection', (socket) => {
         if (!player) return;
 
         const now = Date.now();
+
+        // Server-side cooldown enforcement
+        if (player.lastHitTime && now - player.lastHitTime < HIT_COOLDOWN_MS) return;
+        player.lastHitTime = now;
+
         const newlyBroken = [];
 
         // Filter out blocks that are already broken
@@ -138,7 +142,7 @@ io.on('connection', (socket) => {
                 }
             });
 
-            player.score += scoreGained;
+            player.score = Math.max(0, player.score + scoreGained); // Clamp at 0
             player.timeReachedHighest = now;
 
             const iceRemaining = session.iceBlocks.filter(b => b.active).length;
